@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use clap::{App, Arg};
-use colored::*;
+
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -80,10 +80,29 @@ fn build_syscall_mapping() -> HashMap<&'static str, Vec<SyscallRequirement>> {
     syscalls
 }
 
+struct Gadget {
+    address: u64,
+    instructions: Vec<String>,
+}
 
-fn find_gadgets(elf_file: &Path, section_name: &str){
+impl Gadget {
+    fn sets_register_to(&self, register: &str, value: u32) -> bool {
+        match register {
+            "ecx" => self.instructions.iter().any(|instr| {
+                (instr.contains("xor ecx, ecx") || instr.contains("mov ecx, 0")) && value == 0
+            }),
+            // Add cases for other registers as needed
+            _ => false,
+        }
+    }
+}
+
+
+fn find_gadgets(elf_file: &Path, section_name: &str) -> Vec<Gadget>  {
     let mut f = File::open(elf_file).expect("Failed to open file!");
     let mut buffer = Vec::new();
+    let mut gadgets = Vec::new();
+    let mut current_gadget_instructions: Vec<String> = Vec::new();
     f.read_to_end(&mut buffer).expect("Failed to read the file");
 
     let elf = Elf::parse(&buffer).expect("Failed to parse ELF file");
@@ -102,25 +121,47 @@ fn find_gadgets(elf_file: &Path, section_name: &str){
         .expect("Failed to create Capstone object");
 
     let mut instructions = Vec::new();
+    ////let instruction = format!("{} {}", mnemonic, op_str);
 
     let insns = cs.disasm_all(opcodes, code_section.sh_addr).expect("Failed to disassemble!");
     for i in insns.iter() {
-        instructions.push((i.bytes().to_vec(), i.address()));
-        if i.mnemonic().expect("Failed to get mnemonic") == "ret" {
-            println!("-------------------");
-            let last_five: Vec<_> = instructions.iter().rev().take(5).collect();
-            for z in last_five.iter().rev() {
-                let prev_insns = cs.disasm_count(z.0.as_slice(), z.1, 1).expect("Failed to disassemble");
-                for prev_i in prev_insns.iter() {
-                    let mnemonic = prev_i.mnemonic().unwrap_or("").yellow();
-                    let op_str = prev_i.op_str().unwrap_or("").red();
-                    println!("0x{:x}: \t{}\t{}", prev_i.address(), mnemonic, op_str);
-                }
-            }
-        }
+    instructions.push((i.bytes().to_vec(), i.address()));
+    if i.mnemonic().expect("Failed to get mnemonic") == "ret" {
+        let last_five: Vec<_> = instructions.iter().rev().take(5).collect();
+        let gadget_instructions: Vec<String> = last_five.iter().rev()
+            .map(|&(ref bytes, address)| {
+                let insn = cs.disasm_count(bytes.as_slice(), *address, 1).expect("Failed to disassemble");
+                insn.iter().map(|i| format!("0x{:x}: {} {}", i.address(), i.mnemonic().unwrap_or(""), i.op_str().unwrap_or(""))).collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect();
+
+        gadgets.push(Gadget {
+            address: gadget_instructions.first().map(|instr| {
+                let address_str = instr.split(':').next().unwrap_or("0");
+                u64::from_str_radix(address_str.trim_start_matches("0x"), 16).unwrap_or(0)
+            }).unwrap_or(0),
+            instructions: gadget_instructions,
+        });
+
+        instructions.clear();
     }
+}
+    gadgets
 
 }
+
+
+fn filter_gadgets(gadgets: Vec<Gadget>, pattern: &str) -> Vec<Gadget> {
+    gadgets.into_iter()
+        .filter(|gadget| {
+            gadget.instructions.iter().any(|instr| instr.contains(pattern))
+        })
+        .collect()
+}
+
+
+
 
 fn main(){
     let args: Vec<String> = env::args().collect();
@@ -182,7 +223,17 @@ fn main(){
     println!("Syscall: {}", syscall);
     println!("Parameters: {}", parameters);
 
-    find_gadgets(elf_file, section);
+    let all_gadgets = find_gadgets(elf_file, section);
+    let filtered_gadgets = filter_gadgets(all_gadgets, "xor ecx, ecx");
+
+    for gadget in filtered_gadgets {
+        println!("Gadget at address 0x{:x}", gadget.address);
+        for instr in &gadget.instructions {
+            println!("  {}", instr);
+        }
+        println!("-------------------");
+    }
+
 
 }
 
