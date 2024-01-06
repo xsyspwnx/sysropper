@@ -101,7 +101,6 @@ impl Gadget {
 fn find_gadgets(elf_file: &Path, section_name: &str) -> Vec<Gadget>  {
     let mut f = File::open(elf_file).expect("Failed to open file!");
     let mut buffer = Vec::new();
-    let mut gadgets = Vec::new();
     let mut current_gadget_instructions: Vec<String> = Vec::new();
     f.read_to_end(&mut buffer).expect("Failed to read the file");
 
@@ -120,35 +119,33 @@ fn find_gadgets(elf_file: &Path, section_name: &str) -> Vec<Gadget>  {
         .build()
         .expect("Failed to create Capstone object");
 
-    let mut instructions = Vec::new();
-    ////let instruction = format!("{} {}", mnemonic, op_str);
+     let insns = cs.disasm_all(opcodes, code_section.sh_addr).expect("Failed to disassemble!");
+     let max_instructions_per_gadget = 12;
+         let mut gadgets = Vec::new();
+    let mut current_gadget_instructions = Vec::new();
+    let max_instructions_per_gadget = 12;
 
-    let insns = cs.disasm_all(opcodes, code_section.sh_addr).expect("Failed to disassemble!");
     for i in insns.iter() {
-    instructions.push((i.bytes().to_vec(), i.address()));
-    if i.mnemonic().expect("Failed to get mnemonic") == "ret" {
-        let last_five: Vec<_> = instructions.iter().rev().take(5).collect();
-        let gadget_instructions: Vec<String> = last_five.iter().rev()
-            .map(|&(ref bytes, address)| {
-                let insn = cs.disasm_count(bytes.as_slice(), *address, 1).expect("Failed to disassemble");
-                insn.iter().map(|i| format!("0x{:x}: {} {}", i.address(), i.mnemonic().unwrap_or(""), i.op_str().unwrap_or(""))).collect::<Vec<_>>()
-            })
-            .flatten()
-            .collect();
+        let formatted_instruction = format!("0x00{:x}: {} {}", i.address(), i.mnemonic().unwrap_or(""), i.op_str().unwrap_or(""));
 
-        gadgets.push(Gadget {
-            address: gadget_instructions.first().map(|instr| {
-                let address_str = instr.split(':').next().unwrap_or("0");
-                u64::from_str_radix(address_str.trim_start_matches("0x"), 16).unwrap_or(0)
-            }).unwrap_or(0),
-            instructions: gadget_instructions,
-        });
+        // Check if the instruction matches the start pattern or is part of a gadget
+        if formatted_instruction.contains("xor ecx, ecx") || !current_gadget_instructions.is_empty() {
+            current_gadget_instructions.push(formatted_instruction);
 
-        instructions.clear();
+            // Check if the gadget has reached the maximum length or found a 'ret'
+            if i.mnemonic().unwrap_or("") == "ret" || current_gadget_instructions.len() == max_instructions_per_gadget {
+                if i.mnemonic().unwrap_or("") == "ret" {
+                    gadgets.push(Gadget {
+                        address: i.address() - (current_gadget_instructions.len() as u64 - 1),
+                        instructions: current_gadget_instructions.clone(),
+                    });
+                }
+                current_gadget_instructions.clear();
+            }
+        }
     }
-}
-    gadgets
 
+    gadgets
 }
 
 
@@ -200,7 +197,6 @@ fn main(){
     println!("Syscall: {}", syscall);
     println!("Parameters: {}", parameters);
 
-    // Placeholder for further functionality
 
     let elf_file = Path::new(&args[1]);
     let section  = &args[2];
